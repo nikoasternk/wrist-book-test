@@ -14,7 +14,7 @@ export const DEFAULT_CONFIG = {
 export const CONFIG_LIMITS = {
   fontSize: { min: 20, max: 48 },
   paddingY: { min: 16, max: 76 },
-  brightnessPct: { min: 10, max: 100 },
+  brightnessPct: { min: 50, max: 100 },
   bufferChars: { min: 500, max: 6000 }
 };
 
