@@ -14,6 +14,7 @@
     { "name": "system.file" },
     { "name": "system.interconnect" },
     { "name": "system.brightness" },
+    { "name": "system.battery" },
     { "name": "system.configuration" },
     { "name": "system.device" }
   ],
