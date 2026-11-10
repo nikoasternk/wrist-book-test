@@ -1,0 +1,293 @@
+<template>
+  <div class="settings-page">
+    <scroll class="settings-scroll" scroll-y="true">
+      <div class="settings-content">
+        <div class="back-btn" @click="goBack">
+          <text class="back-btn-txt">{{strings.back}}</text>
+        </div>
+
+        <div class="card">
+          <text class="card-title">{{strings.language}}</text>
+          <div class="toggle-btn toggle-on" @click="cycleLanguage">
+            <text class="toggle-txt">{{languageLabel}}</text>
+          </div>
+        </div>
+
+        <div class="card">
+          <text class="card-title">{{strings.keepScreenOn}}</text>
+          <div class="toggle-btn {{stayAwake ? 'toggle-on' : 'toggle-off'}}" @click="toggleStayAwake">
+            <text class="toggle-txt">{{stayAwake ? strings.enabled : strings.disabled}}</text>
+          </div>
+        </div>
+
+        <div class="card">
+          <text class="card-title">{{strings.brightness}}</text>
+          <text class="preview-txt" style="color: rgba(255,255,255,{{brightnessPct / 100}});">{{strings.sampleText}}</text>
+          <div class="ctrl-row">
+            <div class="ctrl-btn" @click="changeBrightness(-10)">
+              <text class="ctrl-btn-txt">-</text>
+            </div>
+            <text class="ctrl-val">{{brightnessPct}}%</text>
+            <div class="ctrl-btn" @click="changeBrightness(10)">
+              <text class="ctrl-btn-txt">+</text>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <text class="card-title">{{strings.fontSize}}</text>
+          <div class="ctrl-row">
+            <div class="ctrl-btn" @click="changeFont(-2)">
+              <text class="ctrl-btn-txt">-</text>
+            </div>
+            <text class="ctrl-val">{{fontSize}}</text>
+            <div class="ctrl-btn" @click="changeFont(2)">
+              <text class="ctrl-btn-txt">+</text>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <text class="card-title">{{strings.bufferSize}}</text>
+          <div class="ctrl-row">
+            <div class="ctrl-btn" @click="changeBuffer(-500)">
+              <text class="ctrl-btn-txt">-</text>
+            </div>
+            <text class="ctrl-val">{{bufferChars}}</text>
+            <div class="ctrl-btn" @click="changeBuffer(500)">
+              <text class="ctrl-btn-txt">+</text>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <text class="card-title">{{strings.edgePadding}}</text>
+          <div class="ctrl-row">
+            <div class="ctrl-btn" @click="changePadding(-4)">
+              <text class="ctrl-btn-txt">-</text>
+            </div>
+            <text class="ctrl-val">{{paddingY}}</text>
+            <div class="ctrl-btn" @click="changePadding(4)">
+              <text class="ctrl-btn-txt">+</text>
+            </div>
+          </div>
+        </div>
+      </div>
+    </scroll>
+  </div>
+</template>
+
+<script>
+import brightness from '@system.brightness'
+import router from '@system.router'
+import { getStrings } from '../../services/Localization'
+import { CONFIG_LIMITS, hardwareBrightness, loadConfig, saveConfig } from '../../services/Config'
+
+function clamp(value, limits) {
+  return Math.max(limits.min, Math.min(limits.max, value));
+}
+
+export default {
+  private: {
+    strings: getStrings('auto'),
+    language: 'auto',
+    languageLabel: 'Auto',
+    bufferChars: 1500,
+    fontSize: 30,
+    paddingY: 38,
+    stayAwake: true,
+    brightnessPct: 100
+  },
+
+  onInit() {
+    loadConfig((config) => {
+      this.language = config.language;
+      this.bufferChars = config.bufferChars;
+      this.fontSize = config.fontSize;
+      this.paddingY = config.paddingY;
+      this.stayAwake = config.stayAwake;
+      this.brightnessPct = config.brightnessPct;
+      this.applyLanguage();
+      brightness.setKeepScreenOn({ keepScreenOn: this.stayAwake });
+    });
+  },
+
+  applyLanguage() {
+    this.strings = getStrings(this.language);
+    if (this.language === 'en') {
+      this.languageLabel = this.strings.langEn;
+    } else if (this.language === 'ru') {
+      this.languageLabel = this.strings.langRu;
+    } else {
+      this.languageLabel = this.strings.langAuto;
+    }
+  },
+
+  cycleLanguage() {
+    if (this.language === 'auto') {
+      this.language = 'en';
+    } else if (this.language === 'en') {
+      this.language = 'ru';
+    } else {
+      this.language = 'auto';
+    }
+    this.applyLanguage();
+    this.save();
+  },
+
+  toggleStayAwake() {
+    this.stayAwake = !this.stayAwake;
+    brightness.setKeepScreenOn({ keepScreenOn: this.stayAwake });
+    this.save();
+  },
+
+  changeBrightness(delta) {
+    this.brightnessPct = clamp(this.brightnessPct + delta, CONFIG_LIMITS.brightnessPct);
+    brightness.setMode({ mode: 0 });
+    brightness.setValue({ value: hardwareBrightness(this.brightnessPct) });
+    this.save();
+  },
+
+  changeBuffer(delta) {
+    this.bufferChars = clamp(this.bufferChars + delta, CONFIG_LIMITS.bufferChars);
+    this.save();
+  },
+
+  changeFont(delta) {
+    this.fontSize = clamp(this.fontSize + delta, CONFIG_LIMITS.fontSize);
+    this.save();
+  },
+
+  changePadding(delta) {
+    this.paddingY = clamp(this.paddingY + delta, CONFIG_LIMITS.paddingY);
+    this.save();
+  },
+
+  save() {
+    saveConfig({
+      language: this.language,
+      bufferChars: this.bufferChars,
+      fontSize: this.fontSize,
+      paddingY: this.paddingY,
+      stayAwake: this.stayAwake,
+      brightnessPct: this.brightnessPct
+    });
+  },
+
+  goBack() {
+    router.back();
+  }
+}
+</script>
+
+<style>
+.settings-page {
+  width: 212px;
+  height: 520px;
+  background-color: #000000;
+}
+
+.settings-scroll {
+  width: 212px;
+  height: 520px;
+}
+
+.settings-content {
+  width: 212px;
+  padding: 36px 6px 60px 6px;
+  flex-direction: column;
+  align-items: center;
+}
+
+.back-btn {
+  width: 200px;
+  height: 76px;
+  background-color: #262626;
+  border-radius: 28px;
+  justify-content: center;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.back-btn-txt {
+  color: #FFFFFF;
+  font-size: 28px;
+  font-weight: bold;
+}
+
+.card {
+  width: 200px;
+  background-color: #1C1C1C;
+  border-radius: 28px;
+  padding: 16px 10px;
+  margin-bottom: 12px;
+  flex-direction: column;
+  align-items: center;
+}
+
+.card-title {
+  width: 180px;
+  color: #FFFFFF;
+  font-size: 26px;
+  font-weight: bold;
+  text-align: center;
+  lines: -1;
+}
+
+.preview-txt {
+  font-size: 24px;
+  font-weight: bold;
+  margin-top: 6px;
+}
+
+.toggle-btn {
+  width: 180px;
+  height: 72px;
+  border-radius: 24px;
+  margin-top: 12px;
+  justify-content: center;
+  align-items: center;
+}
+
+.toggle-on {
+  background-color: #0D91FF;
+}
+
+.toggle-off {
+  background-color: #333333;
+}
+
+.toggle-txt {
+  color: #FFFFFF;
+  font-size: 26px;
+  font-weight: bold;
+}
+
+.ctrl-row {
+  width: 180px;
+  margin-top: 12px;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.ctrl-btn {
+  width: 60px;
+  height: 64px;
+  background-color: #2E2E2E;
+  border-radius: 20px;
+  justify-content: center;
+  align-items: center;
+}
+
+.ctrl-btn-txt {
+  color: #FFFFFF;
+  font-size: 34px;
+  font-weight: bold;
+}
+
+.ctrl-val {
+  color: #4C8DFF;
+  font-size: 30px;
+  font-weight: bold;
+}
+</style>

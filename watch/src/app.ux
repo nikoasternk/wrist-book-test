@@ -1,0 +1,13 @@
+<script>
+import WearableBridge from './services/WearableBridge'
+import BookReceiver from './services/BookReceiver'
+import router from '@system.router'
+
+globalThis.wearableBridge = new WearableBridge();
+globalThis.wearableBridge.setHandshakeStartListener(() => {
+  router.push({ uri: 'pages/transfer' });
+});
+globalThis.bookReceiver = new BookReceiver(globalThis.wearableBridge);
+
+export default {}
+</script>

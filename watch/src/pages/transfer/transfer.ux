@@ -1,0 +1,140 @@
+<template>
+  <div class="transfer-page">
+    <text class="title">{{strings.syncTitle}}</text>
+    <text class="file-name">{{fileName}}</text>
+    <text class="status">{{statusText}}</text>
+    <text class="percent">{{percent}}%</text>
+    <div class="back-btn" @click="goBack">
+      <text class="back-btn-txt">{{strings.back}}</text>
+    </div>
+  </div>
+</template>
+
+<script>
+import router from '@system.router'
+import brightness from '@system.brightness'
+import { getStrings } from '../../services/Localization'
+import { loadConfig } from '../../services/Config'
+
+const COMPLETION_DELAY_MS = 600;
+
+export default {
+  private: {
+    strings: getStrings('auto'),
+    fileName: '',
+    statusText: '',
+    percent: 0
+  },
+
+  onInit() {
+    loadConfig((config) => {
+      this.strings = getStrings(config.language);
+      this.statusText = this.strings.statusWaiting;
+    });
+
+    this.statusSub = globalThis.wearableBridge.addStatusListener((status) => {
+      if (status === 'connected') {
+        this.statusText = this.strings.statusConnected;
+      }
+    });
+
+    globalThis.bookReceiver.setTransferListener((event) => {
+      if (event.state === 'progress') {
+        this.fileName = event.fileName || '';
+        this.statusText = this.strings.statusReceiving;
+        this.percent = Math.min(100, Math.round(event.progress * 100));
+      } else if (event.state === 'completed') {
+        this.statusText = this.strings.statusCompleted;
+        this.percent = 100;
+        this.completionTimer = setTimeout(() => router.replace({ uri: 'pages/shelf' }), COMPLETION_DELAY_MS);
+      } else if (event.state === 'error') {
+        this.statusText = this.strings.statusError;
+      }
+    });
+  },
+
+  onShow() {
+    brightness.setKeepScreenOn({ keepScreenOn: true });
+  },
+
+  onHide() {
+    brightness.setKeepScreenOn({ keepScreenOn: false });
+  },
+
+  onDestroy() {
+    globalThis.bookReceiver.setTransferListener(null);
+    if (this.completionTimer) {
+      clearTimeout(this.completionTimer);
+      this.completionTimer = null;
+    }
+    if (this.statusSub) {
+      globalThis.wearableBridge.removeStatusListener(this.statusSub);
+      this.statusSub = null;
+    }
+  },
+
+  goBack() {
+    router.back();
+  }
+}
+</script>
+
+<style>
+.transfer-page {
+  width: 212px;
+  height: 520px;
+  background-color: #000000;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  padding: 30px 8px;
+}
+
+.title {
+  color: #FFFFFF;
+  font-size: 28px;
+  font-weight: bold;
+  text-align: center;
+}
+
+.file-name {
+  width: 196px;
+  color: #AAAAAA;
+  font-size: 22px;
+  margin-top: 10px;
+  text-align: center;
+  lines: 2;
+  text-overflow: ellipsis;
+}
+
+.status {
+  color: #888888;
+  font-size: 26px;
+  font-weight: bold;
+  margin-top: 14px;
+  text-align: center;
+}
+
+.percent {
+  color: #4C8DFF;
+  font-size: 52px;
+  font-weight: bold;
+  margin-top: 12px;
+}
+
+.back-btn {
+  width: 192px;
+  height: 76px;
+  margin-top: 28px;
+  background-color: #262626;
+  border-radius: 28px;
+  justify-content: center;
+  align-items: center;
+}
+
+.back-btn-txt {
+  color: #FFFFFF;
+  font-size: 28px;
+  font-weight: bold;
+}
+</style>

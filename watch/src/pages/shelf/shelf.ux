@@ -1,0 +1,195 @@
+<template>
+  <div class="shelf-page">
+    <scroll class="main-scroll" scroll-y="true">
+      <div class="scroll-inner">
+        <text class="app-title">{{strings.appName}}</text>
+
+        <div class="settings-btn" @click="openSettings">
+          <text class="settings-btn-txt">{{strings.settings}}</text>
+        </div>
+
+        <div class="book-card" for="{{bookList}}" @click="openBook($item)">
+          <text class="book-title">{{$item.name}}</text>
+          <text class="book-sub">{{$item.percent}}%</text>
+        </div>
+
+        <div class="empty-box" if="{{bookList.length === 0}}">
+          <text class="empty-title">{{strings.emptyTitle}}</text>
+          <text class="empty-desc">{{strings.emptySubtitle}}</text>
+        </div>
+      </div>
+    </scroll>
+  </div>
+</template>
+
+<script>
+import file from '@system.file'
+import brightness from '@system.brightness'
+import router from '@system.router'
+import { getStrings } from '../../services/Localization'
+import { hardwareBrightness, loadConfig } from '../../services/Config'
+import { loadProgressMap, readPercent } from '../../services/Progress'
+import { BOOKS_DIRECTORY, bookDisplayName, isBookUri } from '../../services/BookFile'
+
+function compareNames(a, b) {
+  if (a.name < b.name) {
+    return -1;
+  }
+  return a.name > b.name ? 1 : 0;
+}
+
+export default {
+  private: {
+    strings: getStrings('auto'),
+    bookList: []
+  },
+
+  onShow() {
+    this.loadConfiguration();
+    this.loadBooks();
+  },
+
+  loadConfiguration() {
+    loadConfig((config) => {
+      this.strings = getStrings(config.language);
+      brightness.setMode({ mode: 0 });
+      brightness.setValue({ value: hardwareBrightness(config.brightnessPct) });
+      brightness.setKeepScreenOn({ keepScreenOn: config.stayAwake });
+    });
+  },
+
+  loadBooks() {
+    loadProgressMap((progressMap) => this.scanDirectory(progressMap));
+  },
+
+  scanDirectory(progressMap) {
+    file.list({
+      uri: BOOKS_DIRECTORY,
+      success: (data) => {
+        const entries = data && data.fileList ? data.fileList : [];
+        this.bookList = entries
+          .filter((item) => item.type === 'file' && isBookUri(item.uri))
+          .map((item) => {
+            const name = bookDisplayName(item.uri);
+            return { uri: item.uri, name: name, percent: readPercent(progressMap[name]) };
+          })
+          .sort(compareNames);
+      },
+      fail: () => {
+        this.bookList = [];
+      }
+    });
+  },
+
+  openBook(item) {
+    router.push({
+      uri: 'pages/reader',
+      params: { uri: item.uri, name: item.name }
+    });
+  },
+
+  openSettings() {
+    router.push({ uri: 'pages/settings' });
+  }
+}
+</script>
+
+<style>
+.shelf-page {
+  width: 212px;
+  height: 520px;
+  background-color: #000000;
+}
+
+.main-scroll {
+  width: 212px;
+  height: 520px;
+}
+
+.scroll-inner {
+  width: 212px;
+  padding: 36px 6px 60px 6px;
+  flex-direction: column;
+  align-items: center;
+}
+
+.app-title {
+  width: 200px;
+  color: #FFFFFF;
+  font-size: 32px;
+  font-weight: bold;
+  text-align: center;
+  margin-bottom: 14px;
+}
+
+.settings-btn {
+  width: 200px;
+  height: 76px;
+  background-color: #1F2937;
+  border-radius: 28px;
+  justify-content: center;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.settings-btn-txt {
+  color: #60A5FA;
+  font-size: 28px;
+  font-weight: bold;
+}
+
+.book-card {
+  width: 200px;
+  min-height: 112px;
+  background-color: #262626;
+  border-radius: 30px;
+  padding: 16px 14px;
+  margin-bottom: 10px;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.book-title {
+  width: 172px;
+  color: #FFFFFF;
+  font-size: 30px;
+  line-height: 36px;
+  font-weight: bold;
+  lines: 2;
+  text-overflow: ellipsis;
+}
+
+.book-sub {
+  width: 172px;
+  color: #A8A8A8;
+  font-size: 26px;
+  line-height: 32px;
+  font-weight: bold;
+  margin-top: 6px;
+}
+
+.empty-box {
+  width: 200px;
+  padding: 24px 8px;
+  flex-direction: column;
+  align-items: center;
+}
+
+.empty-title {
+  color: #FFFFFF;
+  font-size: 30px;
+  font-weight: bold;
+  text-align: center;
+  lines: -1;
+}
+
+.empty-desc {
+  width: 184px;
+  color: #888888;
+  font-size: 24px;
+  line-height: 30px;
+  margin-top: 10px;
+  text-align: center;
+  lines: -1;
+}
+</style>

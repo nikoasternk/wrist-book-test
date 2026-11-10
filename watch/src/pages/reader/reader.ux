@@ -1,0 +1,870 @@
+<template>
+  <div class="reader-page">
+    <div class="status-bar">
+      <text class="status-txt">{{clockTime}}</text>
+      <text class="status-txt">{{progressPercent}}%</text>
+      <text class="status-txt">{{batteryLevel}}%</text>
+    </div>
+
+    <scroll
+      id="viewport"
+      class="viewport"
+      style="opacity: {{ready ? 1 : 0}};"
+      scroll-y="true"
+      @scroll="onScroll"
+      @scrolltop="onScrollTop"
+      @scrollbottom="onScrollBottom"
+      @click="toggleMenu">
+      <div id="content" class="content" style="padding-top: {{paddingY}}px; padding-bottom: {{paddingY}}px;">
+        <text
+          class="book-text"
+          for="{{blocks}}"
+          tid="key"
+          style="font-size: {{fontSize}}px; line-height: {{lineHeight}}px; color: {{textColor}}; margin-bottom: {{$item.gap}}px;">{{$item.text}}</text>
+      </div>
+    </scroll>
+
+    <div class="menu-overlay" if="{{menuVisible}}">
+      <scroll class="menu-scroll" scroll-y="true">
+        <div class="menu-inner">
+          <div class="overlay-btn" @click="goBack">
+            <text class="overlay-btn-txt">{{strings.backToShelf}}</text>
+          </div>
+          <div class="overlay-btn" @click="openSettings">
+            <text class="overlay-btn-txt">{{strings.settings}}</text>
+          </div>
+          <div class="overlay-btn delete-btn" @click="deleteBook">
+            <text class="delete-btn-txt">{{confirmDelete ? strings.confirmDelete : strings.deleteBook}}</text>
+          </div>
+          <div class="overlay-btn" @click="toggleMenu">
+            <text class="overlay-btn-txt">{{strings.closeMenu}}</text>
+          </div>
+        </div>
+      </scroll>
+    </div>
+  </div>
+</template>
+
+<script>
+import battery from '@system.battery'
+import brightness from '@system.brightness'
+import file from '@system.file'
+import router from '@system.router'
+import { getStrings } from '../../services/Localization'
+import { hardwareBrightness, loadConfig, textColorFor } from '../../services/Config'
+import { loadProgressMap, readOffset, readPercent, removeProgress, saveProgress } from '../../services/Progress'
+import { measureBook, readChars } from '../../services/BookFile'
+import {
+  charsPerLineFor,
+  estimateSegmentHeight,
+  findBackwardSkip,
+  findForwardCut,
+  maxSegmentCharsFor,
+  segmentize
+} from '../../services/TextLayout'
+
+const VIEWPORT_HEIGHT = 480;
+const CONTENT_WIDTH = 200;
+const FORWARD_LEAD_PX = 1800;
+const BACKWARD_LEAD_PX = 1200;
+const KEEP_BEHIND_PX = 3000;
+const KEEP_AHEAD_PX = 3000;
+const SOFT_MAX_CONTENT_PX = 16000;
+const HARD_MAX_CONTENT_PX = 26000;
+const CHUNK_PIXEL_BUDGET = 8000;
+const IDLE_MS = 350;
+const LAYOUT_RETRY_MS = 32;
+const LAYOUT_RETRIES = 10;
+const MEASURE_MIN_TOLERANCE_PX = 200;
+const MEASURE_TOLERANCE_RATIO = 0.5;
+const RETRY_BACKOFF_MS = 1500;
+const CLOCK_INTERVAL_MS = 20000;
+const PARAGRAPH_GAP = 12;
+const LINE_HEIGHT_RATIO = 1.35;
+
+function createRuntime(uri, name) {
+  return {
+    uri: uri,
+    name: name,
+    started: false,
+    ready: false,
+    busy: false,
+    idle: false,
+    eof: false,
+    deleted: false,
+    token: 0,
+    layoutKey: '',
+    totalChars: 0,
+    bufferChars: 1500,
+    charsPerLine: 11,
+    segmentChars: 500,
+    headOffset: 0,
+    tailOffset: 0,
+    batches: [],
+    contentHeight: 0,
+    scrollY: 0,
+    savedOffset: -1,
+    retryAt: 0,
+    idleTimer: null
+  };
+}
+
+export default {
+  private: {
+    strings: getStrings('auto'),
+    clockTime: '00:00',
+    batteryLevel: 100,
+    progressPercent: 0,
+    menuVisible: false,
+    confirmDelete: false,
+    ready: false,
+    fontSize: 30,
+    lineHeight: 40,
+    paddingY: 38,
+    textColor: '#FFFFFF',
+    blocks: []
+  },
+
+  protected: {
+    uri: '',
+    name: ''
+  },
+
+  onInit() {
+    this.runtime = createRuntime(this.uri, this.name);
+    this.refreshStatus();
+    this.clockTimer = setInterval(() => this.refreshStatus(), CLOCK_INTERVAL_MS);
+  },
+
+  onShow() {
+    this.confirmDelete = false;
+    loadConfig((config) => this.applyConfig(config));
+  },
+
+  onHide() {
+    this.persist();
+    brightness.setKeepScreenOn({ keepScreenOn: false });
+  },
+
+  onDestroy() {
+    const runtime = this.runtime;
+    this.persist();
+    runtime.token += 1;
+    this.clearIdleTimer();
+    if (this.clockTimer) {
+      clearInterval(this.clockTimer);
+      this.clockTimer = null;
+    }
+  },
+
+  refreshStatus() {
+    const now = new Date();
+    const hours = now.getHours();
+    const minutes = now.getMinutes();
+    this.clockTime = (hours < 10 ? '0' : '') + hours + ':' + (minutes < 10 ? '0' : '') + minutes;
+    battery.getStatus({
+      success: (data) => {
+        this.batteryLevel = Math.round(data.level * 100);
+      }
+    });
+  },
+
+  applyConfig(config) {
+    const runtime = this.runtime;
+    const layoutKey = [config.fontSize, config.paddingY, config.bufferChars].join(':');
+    const rebuild = runtime.started && layoutKey !== runtime.layoutKey;
+    const anchor = rebuild ? this.currentOffset() : 0;
+
+    this.strings = getStrings(config.language);
+    this.textColor = textColorFor(config.brightnessPct);
+    brightness.setMode({ mode: 0 });
+    brightness.setValue({ value: hardwareBrightness(config.brightnessPct) });
+    brightness.setKeepScreenOn({ keepScreenOn: config.stayAwake });
+
+    if (!runtime.started || rebuild) {
+      const lineHeight = Math.floor(config.fontSize * LINE_HEIGHT_RATIO);
+      runtime.layoutKey = layoutKey;
+      runtime.bufferChars = config.bufferChars;
+      runtime.charsPerLine = charsPerLineFor(config.fontSize, CONTENT_WIDTH);
+      runtime.segmentChars = maxSegmentCharsFor(runtime.charsPerLine, lineHeight, VIEWPORT_HEIGHT);
+      this.ready = false;
+      this.fontSize = config.fontSize;
+      this.lineHeight = lineHeight;
+      this.paddingY = config.paddingY;
+    }
+
+    if (!runtime.started) {
+      runtime.started = true;
+      this.openBook();
+    } else if (rebuild) {
+      this.openAt(anchor);
+    }
+  },
+
+  openBook() {
+    const runtime = this.runtime;
+    measureBook(
+      runtime.uri,
+      (totalChars) => {
+        runtime.totalChars = totalChars;
+        if (totalChars <= 0) {
+          this.showMessage(this.strings.emptyFile);
+          return;
+        }
+        loadProgressMap((map) => {
+          const entry = map[runtime.name];
+          this.progressPercent = readPercent(entry);
+          this.openAt(Math.min(readOffset(entry), totalChars - 1));
+        });
+      },
+      () => this.showMessage(this.strings.fileError)
+    );
+  },
+
+  chunkChars() {
+    const runtime = this.runtime;
+    const limit = Math.floor((CHUNK_PIXEL_BUDGET * runtime.charsPerLine) / this.lineHeight);
+    return Math.max(200, Math.min(runtime.bufferChars, limit));
+  },
+
+  openAt(offset) {
+    const runtime = this.runtime;
+    runtime.token += 1;
+    const token = runtime.token;
+    runtime.ready = false;
+    runtime.busy = true;
+    runtime.idle = false;
+    runtime.eof = false;
+    runtime.batches = [];
+    runtime.retryAt = 0;
+    this.clearIdleTimer();
+    this.ready = false;
+
+    const chunk = this.chunkChars();
+    const start = Math.max(0, offset - Math.floor(chunk / 2));
+    const end = Math.min(runtime.totalChars, offset + chunk);
+
+    readChars(
+      runtime.uri,
+      start,
+      end - start,
+      (text) => {
+        if (token !== runtime.token) {
+          return;
+        }
+        const skip = start > 0 ? findBackwardSkip(text, offset - start) : 0;
+        const consumed = end >= runtime.totalChars ? text.length : findForwardCut(text);
+        const base = start + skip;
+        const segments = segmentize(text.slice(skip, consumed), base, runtime.segmentChars, PARAGRAPH_GAP);
+
+        runtime.headOffset = base;
+        runtime.tailOffset = start + consumed;
+        runtime.eof = runtime.tailOffset >= runtime.totalChars;
+        runtime.scrollY = 0;
+
+        if (segments.length === 0 && runtime.eof && base === 0) {
+          this.showMessage(this.strings.emptyFile);
+          return;
+        }
+
+        const baseHeight = this.paddingY * 2;
+        const previous = runtime.contentHeight > 0 ? runtime.contentHeight : baseHeight;
+        const expected = baseHeight + this.estimateHeight(segments);
+        this.blocks = segments;
+        this.$nextTick(() => {
+          this.measureContent(previous, expected, LAYOUT_RETRIES, (measured) => {
+            if (token !== runtime.token) {
+              return;
+            }
+            const height = isFinite(measured) ? measured : expected;
+            runtime.batches = [{
+              count: segments.length,
+              height: height - baseHeight,
+              start: base,
+              end: runtime.tailOffset
+            }];
+            runtime.contentHeight = height;
+            runtime.scrollY = Math.max(0, this.offsetToPixels(offset) - this.paddingY);
+            this.jumpTo(runtime.scrollY);
+            this.$nextTick(() => {
+              if (token !== runtime.token) {
+                return;
+              }
+              this.ready = true;
+              runtime.ready = true;
+              runtime.busy = false;
+              this.pump();
+            });
+          });
+        });
+      },
+      () => {
+        if (token === runtime.token) {
+          this.showMessage(this.strings.readError);
+        }
+      }
+    );
+  },
+
+  showMessage(text) {
+    const runtime = this.runtime;
+    runtime.token += 1;
+    runtime.ready = false;
+    runtime.busy = false;
+    runtime.eof = true;
+    this.blocks = [{ key: 1, start: 0, span: 1, text: text, gap: 0 }];
+    this.ready = true;
+  },
+
+  onScroll(event) {
+    const runtime = this.runtime;
+    if (!runtime.ready) {
+      return;
+    }
+    runtime.scrollY = event.scrollY;
+    runtime.idle = false;
+    this.clearIdleTimer();
+    runtime.idleTimer = setTimeout(() => this.onIdle(), IDLE_MS);
+    this.pump();
+  },
+
+  onScrollTop() {
+    const runtime = this.runtime;
+    if (runtime.ready) {
+      runtime.scrollY = 0;
+      this.pump();
+    }
+  },
+
+  onScrollBottom() {
+    const runtime = this.runtime;
+    if (runtime.ready) {
+      runtime.scrollY = Math.max(0, runtime.contentHeight - VIEWPORT_HEIGHT);
+      this.pump();
+    }
+  },
+
+  onIdle() {
+    const runtime = this.runtime;
+    runtime.idleTimer = null;
+    runtime.idle = true;
+    this.persist();
+    this.pump();
+  },
+
+  clearIdleTimer() {
+    const runtime = this.runtime;
+    if (runtime.idleTimer) {
+      clearTimeout(runtime.idleTimer);
+      runtime.idleTimer = null;
+    }
+  },
+
+  pump() {
+    const runtime = this.runtime;
+    if (!runtime.ready || runtime.busy || Date.now() < runtime.retryAt) {
+      return;
+    }
+    const top = runtime.scrollY;
+    const bottomGap = runtime.contentHeight - (top + VIEWPORT_HEIGHT);
+    if (!runtime.eof && bottomGap < FORWARD_LEAD_PX) {
+      this.loadForward();
+    } else if (runtime.headOffset > 0 && top < BACKWARD_LEAD_PX) {
+      this.loadBackward();
+    } else if (
+      runtime.contentHeight > HARD_MAX_CONTENT_PX ||
+      (runtime.idle && runtime.contentHeight > SOFT_MAX_CONTENT_PX)
+    ) {
+      if (!this.trimHead()) {
+        this.trimTail();
+      }
+    }
+  },
+
+  loadForward() {
+    const runtime = this.runtime;
+    const token = runtime.token;
+    const from = runtime.tailOffset;
+    const count = Math.min(this.chunkChars(), runtime.totalChars - from);
+    if (count <= 0) {
+      runtime.eof = true;
+      return;
+    }
+    runtime.busy = true;
+    readChars(
+      runtime.uri,
+      from,
+      count,
+      (text) => {
+        if (token !== runtime.token) {
+          return;
+        }
+        if (text.length === 0) {
+          runtime.eof = true;
+          this.release(token);
+          return;
+        }
+        const atEnd = from + count >= runtime.totalChars;
+        const consumed = atEnd ? text.length : findForwardCut(text);
+        const segments = segmentize(text.slice(0, consumed), from, runtime.segmentChars, PARAGRAPH_GAP);
+        runtime.tailOffset = from + consumed;
+        runtime.eof = runtime.tailOffset >= runtime.totalChars;
+        this.appendSegments(token, segments, from, runtime.tailOffset);
+      },
+      () => this.failLoad(token)
+    );
+  },
+
+  appendSegments(token, segments, start, end) {
+    const runtime = this.runtime;
+    if (segments.length === 0) {
+      if (runtime.batches.length > 0) {
+        runtime.batches[runtime.batches.length - 1].end = end;
+      }
+      this.release(token);
+      return;
+    }
+    const previous = runtime.contentHeight;
+    const expected = previous + Math.round(this.estimateHeight(segments) * this.heightRatio());
+    this.blocks = this.blocks.concat(segments);
+    this.$nextTick(() => {
+      this.measureContent(previous, expected, LAYOUT_RETRIES, (measured) => {
+        if (token !== runtime.token) {
+          return;
+        }
+        const height = isFinite(measured) ? measured : expected;
+        runtime.batches.push({ count: segments.length, height: height - previous, start: start, end: end });
+        runtime.contentHeight = height;
+        this.release(token);
+      });
+    });
+  },
+
+  loadBackward() {
+    const runtime = this.runtime;
+    const token = runtime.token;
+    const end = runtime.headOffset;
+    const count = Math.min(this.chunkChars(), end);
+    const start = end - count;
+    runtime.busy = true;
+    readChars(
+      runtime.uri,
+      start,
+      count,
+      (text) => {
+        if (token !== runtime.token) {
+          return;
+        }
+        if (text.length === 0) {
+          runtime.headOffset = 0;
+          this.release(token);
+          return;
+        }
+        const skip = start > 0 ? findBackwardSkip(text, Infinity) : 0;
+        const base = start + skip;
+        const segments = segmentize(text.slice(skip), base, runtime.segmentChars, PARAGRAPH_GAP);
+        runtime.headOffset = base;
+        this.prependSegments(token, segments, base, end);
+      },
+      () => this.failLoad(token)
+    );
+  },
+
+  prependSegments(token, segments, start, end) {
+    const runtime = this.runtime;
+    if (segments.length === 0) {
+      this.release(token);
+      return;
+    }
+    const previous = runtime.contentHeight;
+    const estimate = Math.round(this.estimateHeight(segments) * this.heightRatio());
+    const batch = { count: segments.length, height: estimate, start: start, end: end };
+    runtime.batches.unshift(batch);
+    runtime.contentHeight = previous + estimate;
+    this.blocks = segments.concat(this.blocks);
+    this.$nextTick(() => {
+      this.nudge(estimate);
+      this.measureContent(previous, previous + estimate, LAYOUT_RETRIES, (measured) => {
+        if (token !== runtime.token) {
+          return;
+        }
+        const height = isFinite(measured) ? measured : previous + estimate;
+        const actual = height - previous;
+        this.nudge(actual - estimate);
+        batch.height = actual;
+        runtime.contentHeight = height;
+        this.release(token);
+      });
+    });
+  },
+
+  trimHead() {
+    const runtime = this.runtime;
+    const budget = runtime.scrollY - KEEP_BEHIND_PX;
+    let removedHeight = 0;
+    let removedBlocks = 0;
+    let removedBatches = 0;
+    while (removedBatches < runtime.batches.length - 1) {
+      const batch = runtime.batches[removedBatches];
+      if (removedHeight + batch.height > budget) {
+        break;
+      }
+      removedHeight += batch.height;
+      removedBlocks += batch.count;
+      removedBatches += 1;
+    }
+    if (removedBatches === 0) {
+      return false;
+    }
+    const token = runtime.token;
+    const target = Math.max(0, runtime.scrollY - removedHeight);
+    runtime.busy = true;
+    runtime.batches.splice(0, removedBatches);
+    runtime.headOffset = runtime.batches[0].start;
+    runtime.contentHeight -= removedHeight;
+    this.blocks = this.blocks.slice(removedBlocks);
+    this.$nextTick(() => {
+      runtime.scrollY = target;
+      this.jumpTo(target);
+      this.release(token);
+    });
+    return true;
+  },
+
+  trimTail() {
+    const runtime = this.runtime;
+    const keepUntil = runtime.scrollY + VIEWPORT_HEIGHT + KEEP_AHEAD_PX;
+    let accumulated = 0;
+    let keep = 0;
+    for (let i = 0; i < runtime.batches.length; i++) {
+      accumulated += runtime.batches[i].height;
+      if (accumulated >= keepUntil) {
+        keep = i + 1;
+        break;
+      }
+    }
+    if (keep === 0 || keep >= runtime.batches.length) {
+      return false;
+    }
+    const removed = runtime.batches.splice(keep);
+    let removedHeight = 0;
+    let removedBlocks = 0;
+    for (let i = 0; i < removed.length; i++) {
+      removedHeight += removed[i].height;
+      removedBlocks += removed[i].count;
+    }
+    runtime.tailOffset = runtime.batches[keep - 1].end;
+    runtime.eof = false;
+    runtime.contentHeight -= removedHeight;
+    this.blocks = this.blocks.slice(0, this.blocks.length - removedBlocks);
+    return true;
+  },
+
+  release(token) {
+    const runtime = this.runtime;
+    if (token !== runtime.token) {
+      return;
+    }
+    runtime.busy = false;
+    this.pump();
+  },
+
+  failLoad(token) {
+    const runtime = this.runtime;
+    if (token !== runtime.token) {
+      return;
+    }
+    runtime.busy = false;
+    runtime.retryAt = Date.now() + RETRY_BACKOFF_MS;
+    setTimeout(() => this.pump(), RETRY_BACKOFF_MS);
+  },
+
+  measureContent(previous, expected, retries, callback) {
+    let element = null;
+    try {
+      element = this.$element('content');
+    } catch (e) {
+      element = null;
+    }
+    if (!element) {
+      callback(NaN);
+      return;
+    }
+    const tolerance = Math.max(MEASURE_MIN_TOLERANCE_PX, Math.abs(expected - previous) * MEASURE_TOLERANCE_RATIO);
+    element.getBoundingClientRect({
+      success: (rect) => {
+        const plausible = Math.abs(rect.height - expected) <= tolerance;
+        if (!plausible && retries > 0) {
+          setTimeout(() => this.measureContent(previous, expected, retries - 1, callback), LAYOUT_RETRY_MS);
+          return;
+        }
+        callback(plausible ? rect.height : NaN);
+      },
+      fail: () => callback(NaN)
+    });
+  },
+
+  jumpTo(pixels) {
+    try {
+      this.$element('viewport').scrollTo({ top: Math.max(0, pixels), behavior: 'instant' });
+    } catch (e) {
+      return;
+    }
+  },
+
+  nudge(delta) {
+    if (Math.abs(delta) < 1) {
+      return;
+    }
+    this.runtime.scrollY += delta;
+    try {
+      this.$element('viewport').scrollBy({ top: delta, behavior: 'instant' });
+    } catch (e) {
+      return;
+    }
+  },
+
+  blockHeight(block) {
+    return estimateSegmentHeight(block, this.runtime.charsPerLine, this.lineHeight);
+  },
+
+  estimateHeight(segments) {
+    let total = 0;
+    for (let i = 0; i < segments.length; i++) {
+      total += this.blockHeight(segments[i]);
+    }
+    return total;
+  },
+
+  heightRatio() {
+    const runtime = this.runtime;
+    let measured = 0;
+    let estimated = 0;
+    let index = 0;
+    for (let b = 0; b < runtime.batches.length; b++) {
+      const batch = runtime.batches[b];
+      measured += batch.height;
+      for (let i = 0; i < batch.count; i++) {
+        estimated += this.blockHeight(this.blocks[index + i]);
+      }
+      index += batch.count;
+    }
+    return estimated > 0 && measured > 0 ? measured / estimated : 1;
+  },
+
+  scaledHeights(batch, index) {
+    const heights = new Array(batch.count);
+    let total = 0;
+    for (let i = 0; i < batch.count; i++) {
+      heights[i] = this.blockHeight(this.blocks[index + i]);
+      total += heights[i];
+    }
+    const scale = total > 0 ? batch.height / total : 1;
+    for (let i = 0; i < batch.count; i++) {
+      heights[i] *= scale;
+    }
+    return heights;
+  },
+
+  offsetToPixels(offset) {
+    const runtime = this.runtime;
+    let top = this.paddingY;
+    let index = 0;
+    for (let b = 0; b < runtime.batches.length; b++) {
+      const batch = runtime.batches[b];
+      if (offset >= batch.end) {
+        top += batch.height;
+        index += batch.count;
+        continue;
+      }
+      const heights = this.scaledHeights(batch, index);
+      for (let i = 0; i < batch.count; i++) {
+        const block = this.blocks[index + i];
+        if (offset < block.start + block.span) {
+          const fraction = Math.max(0, Math.min(1, (offset - block.start) / block.span));
+          return Math.round(top + fraction * heights[i]);
+        }
+        top += heights[i];
+      }
+      return Math.round(top);
+    }
+    return Math.round(top);
+  },
+
+  pixelsToOffset(pixels) {
+    const runtime = this.runtime;
+    let top = this.paddingY;
+    let index = 0;
+    for (let b = 0; b < runtime.batches.length; b++) {
+      const batch = runtime.batches[b];
+      if (pixels >= top + batch.height) {
+        top += batch.height;
+        index += batch.count;
+        continue;
+      }
+      const heights = this.scaledHeights(batch, index);
+      for (let i = 0; i < batch.count; i++) {
+        if (pixels < top + heights[i]) {
+          const block = this.blocks[index + i];
+          const fraction = Math.max(0, Math.min(1, (pixels - top) / heights[i]));
+          return block.start + Math.min(block.span - 1, Math.floor(fraction * block.span));
+        }
+        top += heights[i];
+      }
+    }
+    const last = this.blocks[this.blocks.length - 1];
+    return last ? last.start : runtime.headOffset;
+  },
+
+  currentOffset() {
+    const runtime = this.runtime;
+    if (runtime.ready && this.blocks.length > 0) {
+      return this.pixelsToOffset(runtime.scrollY + this.paddingY);
+    }
+    return runtime.savedOffset >= 0 ? runtime.savedOffset : 0;
+  },
+
+  persist() {
+    const runtime = this.runtime;
+    if (!runtime || !runtime.ready || runtime.deleted || runtime.totalChars <= 0 || this.blocks.length === 0) {
+      return;
+    }
+    const atEnd = runtime.eof && runtime.contentHeight - (runtime.scrollY + VIEWPORT_HEIGHT) < 8;
+    const offset = atEnd ? runtime.totalChars : this.pixelsToOffset(runtime.scrollY + this.paddingY);
+    if (offset === runtime.savedOffset) {
+      return;
+    }
+    runtime.savedOffset = offset;
+    const percent = Math.min(100, Math.floor((offset / runtime.totalChars) * 100));
+    this.progressPercent = percent;
+    saveProgress(runtime.name, { offset: offset, percent: percent });
+  },
+
+  toggleMenu() {
+    this.menuVisible = !this.menuVisible;
+    this.confirmDelete = false;
+    if (this.menuVisible) {
+      this.refreshStatus();
+    }
+  },
+
+  openSettings() {
+    this.menuVisible = false;
+    router.push({ uri: 'pages/settings' });
+  },
+
+  goBack() {
+    router.back();
+  },
+
+  deleteBook() {
+    if (!this.confirmDelete) {
+      this.confirmDelete = true;
+      return;
+    }
+    const runtime = this.runtime;
+    runtime.deleted = true;
+    removeProgress(runtime.name);
+    file.delete({
+      uri: runtime.uri,
+      complete: () => router.back()
+    });
+  }
+}
+</script>
+
+<style>
+.reader-page {
+  width: 212px;
+  height: 520px;
+  background-color: #000000;
+  flex-direction: column;
+}
+
+.status-bar {
+  width: 212px;
+  height: 40px;
+  padding: 0 18px;
+  background-color: #000000;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.status-txt {
+  color: #888888;
+  font-size: 22px;
+  font-weight: bold;
+}
+
+.viewport {
+  width: 212px;
+  height: 480px;
+}
+
+.content {
+  width: 212px;
+  padding-left: 6px;
+  padding-right: 6px;
+  flex-direction: column;
+}
+
+.book-text {
+  width: 200px;
+  font-weight: bold;
+  text-align: left;
+  lines: -1;
+}
+
+.menu-overlay {
+  position: absolute;
+  top: 0px;
+  left: 0px;
+  width: 212px;
+  height: 520px;
+  background-color: rgba(0, 0, 0, 0.94);
+  z-index: 30;
+}
+
+.menu-scroll {
+  width: 212px;
+  height: 520px;
+}
+
+.menu-inner {
+  width: 212px;
+  padding: 40px 6px;
+  flex-direction: column;
+  align-items: center;
+}
+
+.overlay-btn {
+  width: 200px;
+  min-height: 82px;
+  padding: 14px 10px;
+  margin-bottom: 12px;
+  background-color: #262626;
+  border-radius: 28px;
+  justify-content: center;
+  align-items: center;
+}
+
+.overlay-btn-txt {
+  color: #FFFFFF;
+  font-size: 28px;
+  font-weight: bold;
+  text-align: center;
+  lines: -1;
+}
+
+.delete-btn {
+  background-color: #3B1818;
+}
+
+.delete-btn-txt {
+  color: #FF6B6B;
+  font-size: 28px;
+  font-weight: bold;
+  text-align: center;
+  lines: -1;
+}
+</style>

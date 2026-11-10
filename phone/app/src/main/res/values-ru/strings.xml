@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Wrist Book</string>
+    <string name="tab_text">Ввод текста</string>
+    <string name="tab_file">Файл TXT</string>
+    <string name="device_status">Статус устройства</string>
+    <string name="btn_refresh">Обновить</string>
+    <string name="status_checking">Проверка связи...</string>
+    <string name="status_connected">Подключено: %1$s</string>
+    <string name="status_disconnected">Нет связи (откройте Mi Fitness)</string>
+    <string name="sending_progress">Отправка на браслет: %1$d%%</string>
+    <string name="label_title">Название заметки (необязательно)</string>
+    <string name="label_content">Введите или вставьте текст...</string>
+    <string name="btn_send_text">Отправить текст на часы</string>
+    <string name="no_file_selected">Текстовый файл не выбран</string>
+    <string name="btn_choose_file">Выбрать .TXT файл</string>
+    <string name="btn_send_file">Загрузить файл на часы</string>
+    <string name="default_note_prefix">Заметка</string>
+    <string name="toast_sending">Отправка на Band 10...</string>
+    <string name="toast_success">Передано на Band 10!</string>
+    <string name="error_no_band">Браслет не найден в Mi Fitness</string>
+    <string name="error_watch_unresponsive">Часы не ответили.</string>
+    <string name="error_file_init">Не удалось подготовить файл на часах</string>
+    <string name="error_packet_send">Обрыв соединения при передаче</string>
+    <string name="error_block_timeout">Превышено время ожидания записи на часы</string>
+    <string name="error_read_file">Не удалось прочитать текстовый файл</string>
+    <string name="error_file_too_large">Файл слишком большой (максимум 12 МБ)</string>
+</resources>

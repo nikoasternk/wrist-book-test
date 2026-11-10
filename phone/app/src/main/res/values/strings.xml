@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Wrist Book</string>
+    <string name="tab_text">Text Input</string>
+    <string name="tab_file">TXT File</string>
+    <string name="device_status">Device Status</string>
+    <string name="btn_refresh">Refresh</string>
+    <string name="status_checking">Checking connection...</string>
+    <string name="status_connected">Connected: %1$s</string>
+    <string name="status_disconnected">Disconnected (open Mi Fitness)</string>
+    <string name="sending_progress">Sending to band: %1$d%%</string>
+    <string name="label_title">Note title (optional)</string>
+    <string name="label_content">Enter or paste text...</string>
+    <string name="btn_send_text">Send text to watch</string>
+    <string name="no_file_selected">No text file selected</string>
+    <string name="btn_choose_file">Select .TXT file</string>
+    <string name="btn_send_file">Upload file to watch</string>
+    <string name="default_note_prefix">Note</string>
+    <string name="toast_sending">Sending to Band 10...</string>
+    <string name="toast_success">Sent to Band 10!</string>
+    <string name="error_no_band">Band not found in Mi Fitness</string>
+    <string name="error_watch_unresponsive">Watch did not respond.</string>
+    <string name="error_file_init">Failed to initialize file on watch</string>
+    <string name="error_packet_send">Connection lost during transfer</string>
+    <string name="error_block_timeout">Watch write confirmation timed out</string>
+    <string name="error_read_file">Could not read this text file</string>
+    <string name="error_file_too_large">File is too large (12 MB max)</string>
+</resources>
